@@ -10,6 +10,7 @@
 library(shiny)
 library(tuneR)
 library(neuralcoil)
+library(plotly)
 
 addResourcePath("Music", "Music")
 
@@ -29,32 +30,39 @@ adjust_speed <- function(signal, original_interval, new_interval) {
     return(adjusted_signal)
 }
 
-modify_tracks <- function(tracklist,pan_coil_pmat,vol_coil_pmat,dt,damping_factor){
+modify_tracks <- function(tracklist,pan_coil_pmat,vol_coil_pmat,dt,pan_factor,vol_factor,speed_factor){
     slices = unique(seq(1,length(tracklist[[1]]),dt),length(tracklist[[1]]))
     newtracklist=list()
     for (itrack in 1:ntracks){
         temptrack=data.frame(left=NULL,right=NULL)
+        
         for (iSS in 1:(length(slices)-1)){
             selvec = slices[iSS]:(slices[iSS+1])
             modsec = tracklist[[itrack]][selvec,]
-            modsec@stereo=TRUE
             if (length(modsec@right)==0){
                 modsec@right = as.vector(array(0,length(modsec@left)))
             }
-            #Subnormalize coils:
             pans = c(pan_coil_pmat[iSS,seq(1,dim(pan_coil_pmat)[2],2)[itrack]],
                      pan_coil_pmat[iSS,seq(2,dim(pan_coil_pmat)[2],2)[itrack]])
-            pans = pans/sum(pans)
+            pans = pans/sum(pans)*length(pans)
+            pans = (1-pan_factor)+pans*pan_factor
+            
             modsec@left = modsec@left*pans[1]
             modsec@right = modsec@right*pans[2]
             
-            speeds = vol_coil_pmat[iSS,ntracks:(itrack+ntracks)]
+            speeds = vol_coil_pmat[iSS,(ntracks+1):(ntracks*2)]
             speeds = speeds/sum(speeds)*length(speeds)
-            speeds = (1-damping_factor)+speeds*damping_factor
-            
+            speeds = (1-speed_factor)+speeds*speed_factor
+            if (!length(speeds)==ntracks){
+                sdadasdad
+            }
+
             vols = vol_coil_pmat[iSS,1:ntracks]
             vols = vols/sum(vols)*length(vols)
-            vols = (1-damping_factor)+vols*damping_factor
+            vols = (1-vol_factor)+vols*vol_factor
+            if (!length(vols)==ntracks){
+                sdadasdad
+            }
             
             modsec@left = adjust_speed(modsec@left,1,speeds[itrack])*vols[itrack]
             modsec@right = adjust_speed(modsec@right,1,speeds[itrack])*vols[itrack]
@@ -76,8 +84,9 @@ modify_tracks <- function(tracklist,pan_coil_pmat,vol_coil_pmat,dt,damping_facto
             combined_right <- combined_right + track$right
         }
     }
-    
-    combined_wave <- Wave(cbind(combined_left, combined_right), samp.rate = tracklist[[1]]@samp.rate,bit=tracklist[[1]]@bit)
+    combined_wave <- tuneR::normalize(Wave(cbind(combined_left, combined_right), 
+                                           samp.rate = tracklist[[1]]@samp.rate,
+                                           bit=tracklist[[1]]@bit),unit=as.character(tracklist[[1]]@bit))
     
     #writeWave(combined_wave, "combined_audio.wav")
 }
@@ -105,22 +114,78 @@ n.s <<- ntracks*2
 
 # Define UI for application that draws a histogram
 ui <- fluidPage(
-    sidebarLayout(
-        sidebarPanel(
-            actionButton("generate","Generate Coils"),
-            numericInput("damping_factor","Effect Factor",value=0,min=0,max=1),
-            actionButton("play","Play")
+    fluidRow(
+        column(width=4,
+               numericInput("pan_factor","Pan Effect",value=0,min=0,max=1)
+               ),
+        column(width=4,
+               numericInput("vol_factor","Volume Effect",value=0,min=0,max=1)
+               ),
+        column(width=4,
+               numericInput("speed_factor","Speed Effect",value=0,min=0,max=1)
+               )
+    ),
+    fluidRow(
+        actionButton("generate","Generate Coils"),
+        actionButton("play","Play")
+    ),
+    fluidRow(
+        column(width = 6,
+            plotlyOutput("volbar"),
+            plotOutput("volPlot")
         ),
-        mainPanel(
-            plotOutput("volPlot"),
+        column(width=6,
+            plotlyOutput("speedbar"),
             plotOutput("panPlot")
         )
     )
+            
 )
 
 server <- function(input, output, session) {
     
-    uservals = reactiveValues(pan_coil_pmat=readRDS("saves/pan_coil.RdA"),vol_coil_pmat=readRDS("saves/vol_coil.RdA"))
+    timer = reactiveVal(0)
+    uservals = reactiveValues(pan_coil_pmat=readRDS("saves/pan_coil.RdA"),
+                              vol_coil_pmat=readRDS("saves/vol_coil.RdA"),
+                              dt = 0)
+
+    observe({
+        if (uservals$dt>0){
+            invalidateLater(uservals$dt*1000,session)
+            isolate({
+                if (timer()<Tlen){
+                    timer(timer()+1)
+                    print(timer())
+                }else{
+                    timer(0)
+                    uservals$dt = 0
+                }
+
+            })
+        }
+    })
+
+    output$volbar <- renderPlotly({
+        if (timer()>0){
+            dataplot = data.frame(Category = gsub("[.]wav","",trackfiles),
+                                  Value = uservals$vol_coil_pmat[timer(),1:ntracks])
+            plot_ly(dataplot, x = ~Category, y = ~Value, type = "bar",
+                    marker = list(colorscale = list(c(0,1), c("lawngreen", "red")),color = ~Value)) %>%
+                layout(title = "Volume Graph", xaxis = list(title = "Category"), yaxis = list(title = "Value"),
+                       bargap = 0)
+        }
+    })
+    
+    output$speedbar <- renderPlotly({
+        if (timer()>0){
+            dataplot = data.frame(Category = gsub("[.]wav","",trackfiles),
+                                  Value = uservals$vol_coil_pmat[timer(),(ntracks+1):(ntracks*2)])
+            plot_ly(dataplot, x = ~Category, y = ~Value, type = "bar",
+                    marker = list(colorscale = list(c(0,1), c("lawngreen", "red")),color = ~Value)) %>%
+                layout(title = "Speed Graph", xaxis = list(title = "Category"), yaxis = list(title = "Value"),
+                       bargap = 0)
+        }
+    })
     
     output$volPlot <- renderPlot({
         if (length(uservals$vol_coil_pmat)>0){
@@ -177,14 +242,15 @@ server <- function(input, output, session) {
     
     
     observeEvent(input$play, {
-        newaudio <- modify_tracks(tracklist,uservals$pan_coil_pmat,uservals$vol_coil_pmat,dt,input$damping_factor)
+        newaudio <- modify_tracks(tracklist,uservals$pan_coil_pmat,uservals$vol_coil_pmat,dt,input$pan_factor,input$vol_factor,input$speed_factor)
         writeWave(newaudio, "Music/newfile.wav")
         
-        
+        uservals$dt = length(newaudio@left)/newaudio@samp.rate/Tlen
         insertUI(selector = "#play",
                  where = "afterEnd",
                  ui = tags$audio(src = "Music/newfile.wav", type = "../inputs/newfile.wav", autoplay = TRUE, controls = NA, style="display:none;"), immediate = TRUE 
         )
+        
     })
     
 }
