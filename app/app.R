@@ -9,8 +9,10 @@
 
 library(shiny)
 library(tuneR)
-library(neuralcoil)
 library(plotly)
+
+#Coil functions
+source("coils/coilfunctions.R")
 
 addResourcePath("Music", "Music")
 
@@ -31,16 +33,18 @@ adjust_speed <- function(signal, original_interval, new_interval) {
 }
 
 modify_tracks <- function(tracklist,pan_coil_pmat,vol_coil_pmat,dt,pan_factor,vol_factor,speed_factor){
+    ntracks = length(tracklist)
     slices = unique(seq(1,length(tracklist[[1]]),dt),length(tracklist[[1]]))
     newtracklist=list()
-    for (itrack in 1:ntracks){
+    for (itrack in 1:length(tracklist)){
         temptrack=data.frame(left=NULL,right=NULL)
         
         for (iSS in 1:(length(slices)-1)){
             selvec = slices[iSS]:(slices[iSS+1])
             modsec = tracklist[[itrack]][selvec,]
             if (length(modsec@right)==0){
-                modsec@right = as.vector(array(0,length(modsec@left)))
+                modsec@right = as.vector(modsec@left)*0.5
+                modsec@left = as.vector(modsec@left)*0.5
             }
             pans = c(pan_coil_pmat[iSS,seq(1,dim(pan_coil_pmat)[2],2)[itrack]],
                      pan_coil_pmat[iSS,seq(2,dim(pan_coil_pmat)[2],2)[itrack]])
@@ -84,9 +88,19 @@ modify_tracks <- function(tracklist,pan_coil_pmat,vol_coil_pmat,dt,pan_factor,vo
             combined_right <- combined_right + track$right
         }
     }
-    combined_wave <- tuneR::normalize(Wave(cbind(combined_left, combined_right), 
+    # combined_wave <- tuneR::normalize(Wave(cbind(combined_left, combined_right), 
+    #                                        samp.rate = tracklist[[1]]@samp.rate,
+    #                                        bit=tracklist[[1]]@bit),unit=as.character(tracklist[[1]]@bit))
+    validrange =  c(-(2^(tracklist[[1]]@bit-1)),(2^(tracklist[[1]]@bit-1)) - 1)
+    
+    combined_left = pmax(combined_left,validrange[1])
+    combined_right = pmax(combined_right,validrange[1])
+    combined_left = pmin(combined_left,validrange[2])
+    combined_right = pmin(combined_right,validrange[2])
+
+    combined_wave <- Wave(cbind(combined_left, combined_right),
                                            samp.rate = tracklist[[1]]@samp.rate,
-                                           bit=tracklist[[1]]@bit),unit=as.character(tracklist[[1]]@bit))
+                                           bit=tracklist[[1]]@bit)
     
     #writeWave(combined_wave, "combined_audio.wav")
 }
@@ -126,8 +140,14 @@ ui <- fluidPage(
                )
     ),
     fluidRow(
-        actionButton("generate","Generate Coils"),
-        actionButton("play","Play")
+        column(width = 6,
+               selectizeInput("tracksela","Track Selection",trackfiles,selected=trackfiles,multiple=T)
+               ),
+        column(width = 6,
+               actionButton("generate","Generate Coils"),
+               actionButton("play","Play")
+        )
+
     ),
     fluidRow(
         column(width = 6,
@@ -147,8 +167,9 @@ server <- function(input, output, session) {
     timer = reactiveVal(0)
     uservals = reactiveValues(pan_coil_pmat=readRDS("saves/pan_coil.RdA"),
                               vol_coil_pmat=readRDS("saves/vol_coil.RdA"),
-                              dt = 0)
-
+                              dt = 0,
+                              tracklist=tracklist)
+    
     observe({
         if (uservals$dt>0){
             invalidateLater(uservals$dt*1000,session)
@@ -167,8 +188,8 @@ server <- function(input, output, session) {
 
     output$volbar <- renderPlotly({
         if (timer()>0){
-            dataplot = data.frame(Category = gsub("[.]wav","",trackfiles),
-                                  Value = uservals$vol_coil_pmat[timer(),1:ntracks])
+            dataplot = data.frame(Category = gsub("[.]wav","",names(uservals$tracklist[input$tracksela])),
+                                  Value = uservals$vol_coil_pmat[timer(),1:length(input$tracksela)])
             plot_ly(dataplot, x = ~Category, y = ~Value, type = "bar",
                     marker = list(colorscale = list(c(0,1), c("lawngreen", "red")),color = ~Value)) %>%
                 layout(title = "Volume Graph", xaxis = list(title = "Category"), yaxis = list(title = "Value"),
@@ -178,7 +199,8 @@ server <- function(input, output, session) {
     
     output$speedbar <- renderPlotly({
         if (timer()>0){
-            dataplot = data.frame(Category = gsub("[.]wav","",trackfiles),
+            ntracks = length(input$tracksela)
+            dataplot = data.frame(Category = gsub("[.]wav","",names(uservals$tracklist[input$tracksela])),
                                   Value = uservals$vol_coil_pmat[timer(),(ntracks+1):(ntracks*2)])
             plot_ly(dataplot, x = ~Category, y = ~Value, type = "bar",
                     marker = list(colorscale = list(c(0,1), c("lawngreen", "red")),color = ~Value)) %>%
@@ -203,7 +225,7 @@ server <- function(input, output, session) {
     observeEvent(input$generate,{
         uservals$pan_coil_pmat = NULL
         uservals$vol_coil_pmat = NULL
-        
+        n.s <<- length(input$tracksela)*2
         print("generating coils")
         #pan_coil
         buildcoil(n.s,sym=F)
@@ -212,7 +234,7 @@ server <- function(input, output, session) {
         RandVec=complex(length(group.index),runif(length(group.index),0,1),runif(length(group.index),0,1))
         cont<<-T
         loc<<-T
-        sub.num<<-ntracks #Number of conserved subgroups
+        sub.num<<-length(input$tracksela) #Number of conserved subgroups
         vfara_inert<<-10 #inertia
         vfara_init<<-1 #initial inertia
         
@@ -242,7 +264,7 @@ server <- function(input, output, session) {
     
     
     observeEvent(input$play, {
-        newaudio <- modify_tracks(tracklist,uservals$pan_coil_pmat,uservals$vol_coil_pmat,dt,input$pan_factor,input$vol_factor,input$speed_factor)
+        newaudio <- modify_tracks(uservals$tracklist[input$tracksela],uservals$pan_coil_pmat,uservals$vol_coil_pmat,dt,input$pan_factor,input$vol_factor,input$speed_factor)
         writeWave(newaudio, "Music/newfile.wav")
         
         uservals$dt = length(newaudio@left)/newaudio@samp.rate/Tlen
